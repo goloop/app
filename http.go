@@ -6,13 +6,19 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 )
 
-// httpComponent adapts an *http.Server to the Component lifecycle.
+// httpComponent adapts an *http.Server to the Component lifecycle. The App
+// drives it from a single goroutine, but Component is exported and may be used
+// directly, so the lifecycle flags are guarded.
 type httpComponent struct {
-	name    string
-	srv     *http.Server
+	name string
+	srv  *http.Server
+
+	mu      sync.Mutex
 	ln      net.Listener
+	started bool
 	stopped bool
 }
 
@@ -32,9 +38,17 @@ func (h *httpComponent) Start(ctx context.Context) error {
 	if h.srv == nil {
 		return fmt.Errorf("http server %q: nil *http.Server", h.name)
 	}
+
+	h.mu.Lock()
+	// Starting twice would launch a second Serve and orphan the first listener.
+	if h.started {
+		h.mu.Unlock()
+		return fmt.Errorf("http server %q: already started", h.name)
+	}
 	// An *http.Server cannot serve again once shut down; refuse rather than
 	// appear to start while silently serving nothing.
 	if h.stopped {
+		h.mu.Unlock()
 		return fmt.Errorf("http server %q: already stopped", h.name)
 	}
 	addr := h.srv.Addr
@@ -43,9 +57,12 @@ func (h *httpComponent) Start(ctx context.Context) error {
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		h.mu.Unlock()
 		return err
 	}
 	h.ln = ln
+	h.started = true
+	h.mu.Unlock()
 
 	go func() {
 		if err := h.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -59,7 +76,9 @@ func (h *httpComponent) Start(ctx context.Context) error {
 // deadline passes with connections still open, it forces them closed so the
 // process can exit instead of leaking handler goroutines past shutdown.
 func (h *httpComponent) Stop(ctx context.Context) error {
+	h.mu.Lock()
 	h.stopped = true
+	h.mu.Unlock()
 	if h.srv == nil {
 		return nil
 	}

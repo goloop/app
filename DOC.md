@@ -42,6 +42,7 @@ An empty name defaults to `"app"`. Options:
 | `WithLogger(Logger)` | lifecycle logging | no-op |
 | `WithShutdownTimeout(d)` | deadline for the whole shutdown sequence | 15s |
 | `WithSignals(sigs...)` | signals that trigger shutdown | `SIGINT`, `SIGTERM` |
+| `WithForceQuit(fn)` | action on a second shutdown signal | `os.Exit(130)` |
 
 `Logger` is a two-method subset of `*slog.Logger`, so `slog.Default()` satisfies
 it directly:

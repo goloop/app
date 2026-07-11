@@ -3,12 +3,17 @@ package app
 import (
 	"context"
 	"fmt"
+	"sync"
 )
 
-// workerComponent runs a long-running function as a Component.
+// workerComponent runs a long-running function as a Component. The App drives it
+// from a single goroutine, but Component is exported and may be used directly,
+// so the done channel is guarded.
 type workerComponent struct {
 	name string
 	run  func(context.Context) error
+
+	mu   sync.Mutex
 	done chan struct{}
 }
 
@@ -29,9 +34,19 @@ func (w *workerComponent) Start(ctx context.Context) error {
 	if w.run == nil {
 		return fmt.Errorf("worker %q: nil run function", w.name)
 	}
-	w.done = make(chan struct{})
+	w.mu.Lock()
+	// Starting twice would overwrite done, so Stop would wait only on the newer
+	// goroutine while the first outlived shutdown. Refuse the second start.
+	if w.done != nil {
+		w.mu.Unlock()
+		return fmt.Errorf("worker %q: already started", w.name)
+	}
+	done := make(chan struct{})
+	w.done = done
+	w.mu.Unlock()
+
 	go func() {
-		defer close(w.done)
+		defer close(done)
 		if err := w.run(ctx); err != nil && ctx.Err() == nil {
 			Fatal(ctx, fmt.Errorf("worker %q: %w", w.name, err))
 		}
@@ -41,11 +56,14 @@ func (w *workerComponent) Start(ctx context.Context) error {
 
 // Stop waits for the worker to finish or the shutdown deadline to elapse.
 func (w *workerComponent) Stop(ctx context.Context) error {
-	if w.done == nil {
+	w.mu.Lock()
+	done := w.done
+	w.mu.Unlock()
+	if done == nil {
 		return nil
 	}
 	select {
-	case <-w.done:
+	case <-done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

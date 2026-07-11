@@ -51,6 +51,17 @@ func WithSignals(sigs ...os.Signal) Option {
 	}
 }
 
+// WithForceQuit overrides what happens on a second shutdown signal. The default
+// calls os.Exit(130); a custom function lets an app run its own last-resort
+// cleanup (and makes the behavior testable). A nil function is ignored.
+func WithForceQuit(fn func()) Option {
+	return func(a *App) {
+		if fn != nil {
+			a.forceQuit = fn
+		}
+	}
+}
+
 // App runs a set of explicitly registered components with a controlled
 // lifecycle: ordered start, signal-aware wait, and graceful shutdown in
 // reverse order. It holds no hidden global state.
@@ -59,6 +70,7 @@ type App struct {
 	log             Logger
 	shutdownTimeout time.Duration
 	signals         []os.Signal
+	forceQuit       func()
 
 	components []Component
 	onStart    []Hook
@@ -81,6 +93,7 @@ func New(name string, opts ...Option) *App {
 		log:             nopLogger{},
 		shutdownTimeout: defaultShutdownTimeout,
 		signals:         []os.Signal{os.Interrupt, syscall.SIGTERM},
+		forceQuit:       func() { os.Exit(130) },
 		states:          make(map[string]ComponentStatus),
 	}
 	for _, o := range opts {
@@ -101,6 +114,9 @@ func (a *App) Use(c Component) {
 	if c == nil {
 		return
 	}
+	if a.registerTooLate("Use") {
+		return
+	}
 	a.components = append(a.components, c)
 	a.setState(c.Name(), StatePending, nil)
 }
@@ -108,18 +124,32 @@ func (a *App) Use(c Component) {
 // OnStart registers a hook run before components start, in registration order.
 // Call it before Run; it is not safe to call once Run has started.
 func (a *App) OnStart(h Hook) {
-	if h != nil {
-		a.onStart = append(a.onStart, h)
+	if h == nil || a.registerTooLate("OnStart") {
+		return
 	}
+	a.onStart = append(a.onStart, h)
 }
 
 // OnStop registers a cleanup hook run during shutdown, after components stop,
 // in reverse registration order. Call it before Run; it is not safe to call
 // once Run has started.
 func (a *App) OnStop(h Hook) {
-	if h != nil {
-		a.onStop = append(a.onStop, h)
+	if h == nil || a.registerTooLate("OnStop") {
+		return
 	}
+	a.onStop = append(a.onStop, h)
+}
+
+// registerTooLate reports whether registration is happening after Run started.
+// It ignores the late call (rather than racing the slices Run reads) and logs a
+// warning, so a misuse is loud but never a data race.
+func (a *App) registerTooLate(method string) bool {
+	if a.running.Load() {
+		a.log.Error("registration after Run is ignored",
+			"app", a.name, "method", method)
+		return true
+	}
+	return false
 }
 
 // fatalCtxKey identifies the fatal-error channel carried in the run context.
@@ -255,6 +285,15 @@ func (a *App) shutdown(started []Component) error {
 	}
 
 	for i := len(a.onStop) - 1; i >= 0; i-- {
+		if stopCtx.Err() != nil {
+			// The deadline is spent: the hook would only time out. Skip it
+			// loudly rather than silently running it against a dead context.
+			a.log.Error("stop hook skipped: shutdown deadline exceeded",
+				"app", a.name)
+			errs = append(errs, fmt.Errorf(
+				"%s: stop hook skipped: %w", a.name, stopCtx.Err()))
+			continue
+		}
 		if err := stopBounded(stopCtx, a.onStop[i]); err != nil {
 			errs = append(errs, fmt.Errorf("%s: stop hook: %w", a.name, err))
 		}
@@ -268,6 +307,11 @@ func (a *App) shutdown(started []Component) error {
 // once the deadline passes. The stuck goroutine leaks, but shutdown stays
 // bounded and the process can exit, honoring the shutdown-timeout contract.
 func stopBounded(ctx context.Context, stop func(context.Context) error) error {
+	// The deadline is already spent: do not spawn a goroutine that would
+	// outlive Run if stop ignores the canceled context. Report it as timed out.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	done := make(chan error, 1)
 	go func() { done <- stop(ctx) }()
 	select {
@@ -289,7 +333,7 @@ func (a *App) watchForceQuit() func() {
 		select {
 		case <-ch:
 			a.log.Error("forced shutdown on second signal", "app", a.name)
-			os.Exit(130)
+			a.forceQuit()
 		case <-done:
 		}
 	}()

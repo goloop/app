@@ -345,3 +345,83 @@ func TestRunSingleUse(t *testing.T) {
 		t.Fatalf("second Run = %v, want ErrAlreadyRunning", err)
 	}
 }
+
+// Registration after Run has started is ignored, not a data race.
+func TestRegistrationAfterRunIgnored(t *testing.T) {
+	a := New("t")
+	if err := a.Run(cancelAfter(5 * time.Millisecond)); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// running stays true after Run; late registration must be dropped.
+	before := len(a.components)
+	a.Use(&fakeComp{name: "late", rec: &recorder{}})
+	a.OnStart(func(context.Context) error { return nil })
+	a.OnStop(func(context.Context) error { return nil })
+	if len(a.components) != before || len(a.onStart) != 0 || len(a.onStop) != 0 {
+		t.Fatal("late registration was not ignored")
+	}
+}
+
+// A worker rejects a second direct Start rather than overwriting its done
+// channel.
+func TestWorkerStartNotIdempotent(t *testing.T) {
+	w := Worker("w", func(ctx context.Context) error {
+		<-ctx.Done()
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if err := w.Start(ctx); err == nil {
+		t.Fatal("second Start should error")
+	}
+	cancel()
+	_ = w.Stop(context.Background())
+}
+
+// An HTTP component rejects a second Start.
+func TestHTTPServerStartNotIdempotent(t *testing.T) {
+	c := HTTPServer("h", &http.Server{Addr: "127.0.0.1:0"})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	defer c.Stop(context.Background())
+	if err := c.Start(context.Background()); err == nil {
+		t.Fatal("second Start should error")
+	}
+}
+
+// stopBounded returns immediately (no goroutine) when the context is already
+// done.
+func TestStopBoundedExpiredContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	err := stopBounded(ctx, func(context.Context) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("want ctx error for expired context")
+	}
+	if called {
+		t.Fatal("stop must not be invoked for an already-expired context")
+	}
+}
+
+// WithForceQuit replaces the os.Exit(130) behavior with a custom hook.
+func TestWithForceQuit(t *testing.T) {
+	called := make(chan struct{}, 1)
+	a := New("t", WithForceQuit(func() { called <- struct{}{} }))
+	if a.forceQuit == nil {
+		t.Fatal("forceQuit not set")
+	}
+	a.forceQuit()
+	select {
+	case <-called:
+	default:
+		t.Fatal("custom force-quit hook was not invoked")
+	}
+}

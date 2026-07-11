@@ -43,6 +43,7 @@ a := app.New("api", opts...)
 | `WithLogger(Logger)` | логування життєвого циклу | no-op |
 | `WithShutdownTimeout(d)` | дедлайн усього shutdown | 15s |
 | `WithSignals(sigs...)` | сигнали, що запускають shutdown | `SIGINT`, `SIGTERM` |
+| `WithForceQuit(fn)` | дія на другий сигнал shutdown | `os.Exit(130)` |
 
 `Logger` - двометодна підмножина `*slog.Logger`, тож `slog.Default()` підходить
 напряму:
