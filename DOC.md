@@ -73,7 +73,8 @@ err := a.Run(ctx)
 
 `Run`:
 
-1. flips a running flag (`ErrAlreadyRunning` if already running);
+1. flips a one-shot running flag (`ErrAlreadyRunning` on any later call - an
+   App runs once, so register everything before `Run`);
 2. wraps `ctx` with `signal.NotifyContext` for the configured signals;
 3. runs start hooks;
 4. starts components in order; a synchronous `Start` error stops the
@@ -81,7 +82,10 @@ err := a.Run(ctx)
 5. waits on one of: the signal/parent context, or a fatal component error;
 6. cancels the run context (so workers observe cancellation), stops components
    in reverse order with a fresh timeout context, runs stop hooks, and returns
-   the aggregated error (via `errors.Join`).
+   the aggregated error (via `errors.Join`). Each `Stop` is bounded by the
+   timeout even if it ignores its context, so a stuck component cannot hang the
+   shutdown. `HTTPServer` forces connections closed if graceful `Shutdown`
+   exceeds the deadline.
 
 A clean, signal-triggered shutdown returns `nil`. A **second** signal during
 shutdown forces an immediate process exit (code 130), so a slow graceful stop

@@ -11,5 +11,8 @@ type Logger interface {
 // nopLogger is the default Logger: it discards everything.
 type nopLogger struct{}
 
-func (nopLogger) Info(string, ...any)  {}
+// Info discards the info-level record.
+func (nopLogger) Info(string, ...any) {}
+
+// Error discards the error-level record.
 func (nopLogger) Error(string, ...any) {}

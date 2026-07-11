@@ -284,3 +284,64 @@ func TestHTTPServerBindError(t *testing.T) {
 		t.Fatalf("expected bind error on %s", addr)
 	}
 }
+
+// blockingStopComp ignores the stop context and blocks forever, exercising the
+// bounded-shutdown guarantee.
+type blockingStopComp struct{ name string }
+
+func (b blockingStopComp) Name() string                { return b.name }
+func (b blockingStopComp) Start(context.Context) error { return nil }
+func (b blockingStopComp) Stop(context.Context) error  { select {} }
+
+// fatalOnStart reports a fatal error synchronously from Start.
+type fatalOnStart struct{ name string }
+
+func (f fatalOnStart) Name() string { return f.name }
+func (f fatalOnStart) Start(ctx context.Context) error {
+	Fatal(ctx, errors.New("boom"))
+	return nil
+}
+func (f fatalOnStart) Stop(context.Context) error { return nil }
+
+func TestShutdownBoundedByTimeout(t *testing.T) {
+	a := New("t", WithShutdownTimeout(50*time.Millisecond))
+	a.Use(blockingStopComp{name: "stuck"})
+
+	done := make(chan error, 1)
+	go func() { done <- a.Run(cancelAfter(10 * time.Millisecond)) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a stop-timeout error, got nil")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run hung on a Stop that ignores its context")
+	}
+}
+
+func TestFatalDuringStartupStopsBeforeDependents(t *testing.T) {
+	rec := &recorder{}
+	a := New("t")
+	a.Use(fatalOnStart{name: "boom"})
+	a.Use(&fakeComp{name: "late", rec: rec})
+
+	if err := a.Run(context.Background()); err == nil {
+		t.Fatal("expected a fatal error")
+	}
+	for _, e := range rec.snapshot() {
+		if e == "start:late" {
+			t.Fatal("a dependent started after a fatal error during startup")
+		}
+	}
+}
+
+func TestRunSingleUse(t *testing.T) {
+	a := New("t")
+	if err := a.Run(cancelAfter(5 * time.Millisecond)); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if err := a.Run(context.Background()); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("second Run = %v, want ErrAlreadyRunning", err)
+	}
+}

@@ -37,8 +37,11 @@
 // Run creates a signal-aware context, starts the components in registration
 // order, waits for a signal, parent cancellation or a fatal component error,
 // then stops the components in reverse order and runs the stop hooks. It
-// returns the aggregated error (nil on a clean, signal-triggered shutdown). A
-// second signal during shutdown forces an immediate exit.
+// returns the aggregated error (nil on a clean shutdown from a signal or parent
+// cancellation). Shutdown is bounded by the timeout even if a component's Stop
+// ignores its context, and a second signal during shutdown forces an immediate
+// exit. An App is single-use: a second Run returns ErrAlreadyRunning, so
+// register everything before the one call to Run.
 //
 // # Status and health
 //

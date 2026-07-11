@@ -93,7 +93,10 @@ func New(name string, opts ...Option) *App {
 func (a *App) Name() string { return a.name }
 
 // Use registers a component. Components start in registration order and stop
-// in reverse. A nil component is ignored.
+// in reverse. A nil component is ignored. Component names should be unique: the
+// status map is keyed by name, so a duplicate name overwrites the earlier
+// component's reported state. Call Use before Run; it is not safe to call once
+// Run has started.
 func (a *App) Use(c Component) {
 	if c == nil {
 		return
@@ -103,6 +106,7 @@ func (a *App) Use(c Component) {
 }
 
 // OnStart registers a hook run before components start, in registration order.
+// Call it before Run; it is not safe to call once Run has started.
 func (a *App) OnStart(h Hook) {
 	if h != nil {
 		a.onStart = append(a.onStart, h)
@@ -110,7 +114,8 @@ func (a *App) OnStart(h Hook) {
 }
 
 // OnStop registers a cleanup hook run during shutdown, after components stop,
-// in reverse registration order.
+// in reverse registration order. Call it before Run; it is not safe to call
+// once Run has started.
 func (a *App) OnStop(h Hook) {
 	if h != nil {
 		a.onStop = append(a.onStop, h)
@@ -137,12 +142,17 @@ func Fatal(ctx context.Context, err error) {
 
 // Run starts the components, waits for a shutdown signal, parent cancellation
 // or a fatal component error, then shuts everything down gracefully. It returns
-// the aggregated error (nil on a clean signal-triggered shutdown).
+// the aggregated error (nil on a clean shutdown from a signal or parent
+// cancellation).
+//
+// An App is single-use: once Run has been called it cannot be run again, and a
+// second call returns ErrAlreadyRunning. Register every component and hook
+// before calling Run; the registration methods are not safe to call once Run
+// has started.
 func (a *App) Run(ctx context.Context) error {
 	if !a.running.CompareAndSwap(false, true) {
 		return ErrAlreadyRunning
 	}
-	defer a.running.Store(false)
 
 	sigCtx, stopSig := signal.NotifyContext(ctx, a.signals...)
 	defer stopSig()
@@ -153,8 +163,9 @@ func (a *App) Run(ctx context.Context) error {
 	fatal := make(chan error, len(a.components)+1)
 	runCtx := context.WithValue(base, fatalCtxKey{}, fatal)
 
-	// Start hooks run before any component; a failure aborts the run but still
-	// runs stop hooks so earlier hooks can clean up.
+	// Start hooks run before any component; a failure aborts the run and then
+	// runs every registered stop hook in reverse, so a hook can clean up after
+	// a sibling's failure.
 	for _, h := range a.onStart {
 		if err := h(runCtx); err != nil {
 			cancel() // let any resources tied to runCtx unwind before shutdown
@@ -179,6 +190,16 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		a.setState(c.Name(), StateRunning, nil)
 		started = append(started, c)
+
+		// A component started earlier may already have failed fatally (a worker
+		// whose goroutine called Fatal). Stop before starting its dependents.
+		select {
+		case err := <-fatal:
+			cancel()
+			a.log.Error("fatal component error during startup", "app", a.name, "error", err)
+			return errors.Join(err, a.shutdown(started))
+		default:
+		}
 	}
 
 	a.log.Info("running", "app", a.name, "components", len(started))
@@ -186,7 +207,11 @@ func (a *App) Run(ctx context.Context) error {
 	var cause error
 	select {
 	case <-sigCtx.Done():
-		a.log.Info("shutdown signal received", "app", a.name)
+		if ctx.Err() != nil {
+			a.log.Info("parent context canceled, shutting down", "app", a.name)
+		} else {
+			a.log.Info("shutdown signal received", "app", a.name)
+		}
 	case err := <-fatal:
 		cause = err
 		a.log.Error("fatal component error, shutting down", "app", a.name, "error", err)
@@ -211,22 +236,46 @@ func (a *App) shutdown(started []Component) error {
 		c := started[i]
 		a.setState(c.Name(), StateStopping, nil)
 		a.log.Info("stopping component", "app", a.name, "component", c.Name())
-		if err := c.Stop(stopCtx); err != nil {
+		err := stopBounded(stopCtx, c.Stop)
+		if err != nil {
 			a.setState(c.Name(), StateFailed, err)
 			a.log.Error("component stop failed", "app", a.name, "component", c.Name(), "error", err)
 			errs = append(errs, fmt.Errorf("%s: stop %s: %w", a.name, c.Name(), err))
+			if stopCtx.Err() != nil {
+				// The shutdown deadline is spent; the remaining components would
+				// all time out. Mark them and stop waiting so Run returns.
+				for j := i - 1; j >= 0; j-- {
+					a.setState(started[j].Name(), StateFailed, stopCtx.Err())
+				}
+				break
+			}
 		} else {
 			a.setState(c.Name(), StateStopped, nil)
 		}
 	}
 
 	for i := len(a.onStop) - 1; i >= 0; i-- {
-		if err := a.onStop[i](stopCtx); err != nil {
+		if err := stopBounded(stopCtx, a.onStop[i]); err != nil {
 			errs = append(errs, fmt.Errorf("%s: stop hook: %w", a.name, err))
 		}
 	}
 
 	return errors.Join(errs...)
+}
+
+// stopBounded runs stop and returns its error, but never blocks past the
+// context deadline: if stop ignores ctx and hangs, stopBounded returns ctx.Err()
+// once the deadline passes. The stuck goroutine leaks, but shutdown stays
+// bounded and the process can exit, honoring the shutdown-timeout contract.
+func stopBounded(ctx context.Context, stop func(context.Context) error) error {
+	done := make(chan error, 1)
+	go func() { done <- stop(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // watchForceQuit exits the process on a second shutdown signal, so an impatient

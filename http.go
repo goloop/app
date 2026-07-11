@@ -55,11 +55,17 @@ func (h *httpComponent) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts the server down within the context deadline.
+// Stop gracefully shuts the server down within the context deadline. If the
+// deadline passes with connections still open, it forces them closed so the
+// process can exit instead of leaking handler goroutines past shutdown.
 func (h *httpComponent) Stop(ctx context.Context) error {
 	h.stopped = true
 	if h.srv == nil {
 		return nil
 	}
-	return h.srv.Shutdown(ctx)
+	if err := h.srv.Shutdown(ctx); err != nil {
+		_ = h.srv.Close()
+		return err
+	}
+	return nil
 }
