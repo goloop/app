@@ -189,3 +189,7 @@ aggregation, lifecycle logging, a status snapshot.
 `app` does not: dependency injection, configuration parsing, routing, a health
 registry or HTTP handlers, supervision/restart. Those belong to other packages
 or to your wiring code.
+
+## Release v1.0.0
+
+Publish the existing lifecycle API as version 1.0.0. The v1 release keeps the existing import path and public API. Future incompatible changes require a new major version.
