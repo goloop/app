@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Honor server TLS settings and report shutdown failures.
 
+Cover TLS startup and worker drain errors.
+
 ## [1.0.0] - 2026-10-18
 
 Publish the existing lifecycle API as version 1.0.0. The v1 release keeps the existing import path and public API. Future incompatible changes require a new major version.

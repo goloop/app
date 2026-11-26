@@ -193,3 +193,7 @@ or to your wiring code.
 ## Release v1.0.0
 
 Publish the existing lifecycle API as version 1.0.0. The v1 release keeps the existing import path and public API. Future incompatible changes require a new major version.
+
+## Usage notes
+
+A server with TLSConfig starts HTTPS and requires a certificate source. A worker error during drain is reported by App.Run.
