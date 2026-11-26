@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -13,8 +14,9 @@ type workerComponent struct {
 	name string
 	run  func(context.Context) error
 
-	mu   sync.Mutex
-	done chan struct{}
+	mu       sync.Mutex
+	done     chan struct{}
+	drainErr error
 }
 
 // Worker wraps a blocking, long-running function as a Component. Start launches
@@ -47,8 +49,12 @@ func (w *workerComponent) Start(ctx context.Context) error {
 
 	go func() {
 		defer close(done)
-		if err := w.run(ctx); err != nil && ctx.Err() == nil {
-			Fatal(ctx, fmt.Errorf("worker %q: %w", w.name, err))
+		if err := w.run(ctx); err != nil {
+			if ctx.Err() == nil {
+				Fatal(ctx, fmt.Errorf("worker %q: %w", w.name, err))
+			} else if !errors.Is(err, ctx.Err()) {
+				w.drainErr = err
+			}
 		}
 	}()
 	return nil
@@ -64,7 +70,7 @@ func (w *workerComponent) Stop(ctx context.Context) error {
 	}
 	select {
 	case <-done:
-		return nil
+		return w.drainErr
 	case <-ctx.Done():
 		return ctx.Err()
 	}

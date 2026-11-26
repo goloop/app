@@ -184,11 +184,10 @@ func (a *App) Run(ctx context.Context) error {
 		return ErrAlreadyRunning
 	}
 
-	sigCtx, stopSig := signal.NotifyContext(ctx, a.signals...)
-	defer stopSig()
-
-	base, cancel := context.WithCancel(sigCtx)
+	base, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stopSignals := a.watchSignals(base, cancel)
+	defer stopSignals()
 
 	fatal := make(chan error, len(a.components)+1)
 	runCtx := context.WithValue(base, fatalCtxKey{}, fatal)
@@ -236,7 +235,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	var cause error
 	select {
-	case <-sigCtx.Done():
+	case <-base.Done():
 		if ctx.Err() != nil {
 			a.log.Info("parent context canceled, shutting down", "app", a.name)
 		} else {
@@ -257,9 +256,6 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) shutdown(started []Component) error {
 	stopCtx, cancel := context.WithTimeout(context.Background(), a.shutdownTimeout)
 	defer cancel()
-
-	stopForce := a.watchForceQuit()
-	defer stopForce()
 
 	var errs []error
 	for i := len(started) - 1; i >= 0; i-- {
@@ -322,25 +318,27 @@ func stopBounded(ctx context.Context, stop func(context.Context) error) error {
 	}
 }
 
-// watchForceQuit exits the process on a second shutdown signal, so an impatient
-// operator is never stuck behind a slow graceful shutdown. The returned func
-// stops watching.
-func (a *App) watchForceQuit() func() {
-	ch := make(chan os.Signal, 1)
+// watchSignals cancels the run on the first signal. A signal during
+// shutdown invokes the force-quit hook even if startup is still blocked.
+func (a *App) watchSignals(ctx context.Context, cancel context.CancelFunc) func() {
+	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, a.signals...)
 	done := make(chan struct{})
 	go func() {
-		select {
-		case <-ch:
-			a.log.Error("forced shutdown on second signal", "app", a.name)
-			a.forceQuit()
-		case <-done:
+		for {
+			select {
+			case <-done:
+				return
+			case <-ch:
+				if ctx.Err() != nil {
+					a.forceQuit()
+					return
+				}
+				cancel()
+			}
 		}
 	}()
-	return func() {
-		signal.Stop(ch)
-		close(done)
-	}
+	return func() { signal.Stop(ch); close(done) }
 }
 
 // setState records a component's lifecycle state for Status.

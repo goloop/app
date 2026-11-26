@@ -54,18 +54,32 @@ func (h *httpComponent) Start(ctx context.Context) error {
 	addr := h.srv.Addr
 	if addr == "" {
 		addr = ":http"
+		if h.srv.TLSConfig != nil {
+			addr = ":https"
+		}
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		h.mu.Unlock()
 		return err
 	}
+	if cfg := h.srv.TLSConfig; cfg != nil && len(cfg.Certificates) == 0 && cfg.GetCertificate == nil && cfg.GetConfigForClient == nil {
+		ln.Close()
+		h.mu.Unlock()
+		return fmt.Errorf("http server %q: TLS requires a certificate source", h.name)
+	}
 	h.ln = ln
 	h.started = true
 	h.mu.Unlock()
 
 	go func() {
-		if err := h.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if h.srv.TLSConfig != nil {
+			err = h.srv.ServeTLS(ln, "", "")
+		} else {
+			err = h.srv.Serve(ln)
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			Fatal(ctx, fmt.Errorf("http server %q: %w", h.name, err))
 		}
 	}()
